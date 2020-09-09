@@ -3,6 +3,9 @@ import { browser } from "webextension-polyfill-ts"
 import * as types from "./types"
 import defaultSetting from "./setting/setting.json"
 
+const retryCount = 3
+const retryTime = 1 // seconds
+
 const countSiteInfo = (siteInfo: types.SiteInfo) => {
   let count = 0
   let hasValue = false
@@ -38,24 +41,50 @@ const main = async () => {
       for (const category of siteInfo) {
         if (category.updatedAt === 0) {
           for (const file of category.files) {
-            const url = `${target}${file.name}`
-            try {
-              const res = await fetch(url, {
-                method: setting.useGET ? "GET" : "HEAD",
-              })
-              if (res.redirected) {
-                file.status = 300 // there're no way to detect exact status code for redirection.
-              } else {
-                file.status = res.status
+            for (let i = 0; i < retryCount; i++) {
+              let retryAfter = 0
+
+              const url = `${target}${file.name}`
+              try {
+                const res = await fetch(url, {
+                  method: setting.useGET ? "GET" : "HEAD",
+                })
+                if (res.redirected) {
+                  file.status = 300 // there're no way to detect exact status code for redirection.
+                } else {
+                  file.status = res.status
+                }
+                file.contentType = res.headers
+                  .get("Content-Type")
+                  .split(";")[0]
+                  .trim()
+
+                if (
+                  file.status === 429 ||
+                  (500 <= file.status && file.status < 600)
+                ) {
+                  // retry if it's possible
+                  retryAfter = parseInt(res.headers.get("Retry-After"))
+                  if (retryAfter) {
+                    await new Promise((resolve) =>
+                      setTimeout(resolve, retryAfter * 1000)
+                    )
+                  } else {
+                    await new Promise((resolve) =>
+                      setTimeout(resolve, retryTime * 1000)
+                    )
+                  }
+
+                  continue
+                }
+              } catch (e) {
+                // skip
               }
-              file.contentType = res.headers
-                .get("Content-Type")
-                .split(";")[0]
-                .trim()
-            } catch (e) {
-              // skip
+
+              await browser.storage.local.set({ [target]: siteInfo })
+
+              break
             }
-            await browser.storage.local.set({ [target]: siteInfo })
           }
 
           category.updatedAt = now
